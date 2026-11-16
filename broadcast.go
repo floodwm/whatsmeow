@@ -16,24 +16,24 @@ import (
 )
 
 func (cli *Client) getBroadcastListParticipants(ctx context.Context, jid types.JID) ([]types.JID, error) {
-	var list []types.JID
-	var err error
-	if jid == types.StatusBroadcastJID {
-		list, err = cli.getStatusBroadcastRecipients(ctx)
-	} else {
+	if jid != types.StatusBroadcastJID {
 		return nil, ErrBroadcastListUnsupported
 	}
+	if cli.getOwnID().IsEmpty() {
+		return nil, ErrNotLoggedIn
+	}
+	ownID := cli.getOwnLID().ToNonAD()
+	if ownID.User == "" || ownID.Server != types.HiddenUserServer {
+		return nil, errors.New("own LID is unavailable for status broadcast")
+	}
+	list, err := cli.getStatusBroadcastRecipients(ctx)
 	if err != nil {
 		return nil, err
-	}
-	ownID := cli.getOwnID().ToNonAD()
-	if ownID.IsEmpty() {
-		return nil, ErrNotLoggedIn
 	}
 
 	selfIndex := -1
 	for i, participant := range list {
-		if participant.User == ownID.User {
+		if participant == ownID {
 			selfIndex = i
 			break
 		}
@@ -49,37 +49,109 @@ func (cli *Client) getStatusBroadcastRecipients(ctx context.Context) ([]types.JI
 	if err != nil {
 		return nil, fmt.Errorf("failed to get status privacy: %w", err)
 	}
-	statusPrivacy := statusPrivacyOptions[0]
-	if statusPrivacy.Type == types.StatusPrivacyTypeWhitelist {
-		// Whitelist mode, just return the list
-		return statusPrivacy.List, nil
+	return cli.resolveStatusBroadcastRecipients(ctx, statusPrivacyOptions[0])
+}
+
+func (cli *Client) resolveStatusBroadcastRecipients(ctx context.Context, statusPrivacy types.StatusPrivacy) ([]types.JID, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var candidates, exclusions []types.JID
+	switch statusPrivacy.Type {
+	case types.StatusPrivacyTypeWhitelist:
+		candidates = statusPrivacy.List
+	case types.StatusPrivacyTypeContacts, types.StatusPrivacyTypeBlacklist:
+		contacts, err := cli.Store.Contacts.GetAllContacts(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get contact list from db: %w", err)
+		}
+		for jid, contact := range contacts {
+			// Keep the saved-contact rule: a push name alone is not a contact.
+			if contact.FullName != "" && (jid.Server == types.DefaultUserServer || jid.Server == types.LegacyUserServer || jid.Server == types.HiddenUserServer) {
+				candidates = append(candidates, jid)
+			}
+		}
+		if statusPrivacy.Type == types.StatusPrivacyTypeBlacklist {
+			exclusions = statusPrivacy.List
+		}
+	default:
+		return nil, fmt.Errorf("unsupported status privacy type %q", statusPrivacy.Type)
 	}
 
-	// Blacklist or all contacts mode. Find all contacts from database, then filter them appropriately.
-	contacts, err := cli.Store.Contacts.GetAllContacts(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get contact list from db: %w", err)
+	baseJID := func(jid types.JID) types.JID {
+		jid = jid.ToNonAD()
+		if jid.Server == types.LegacyUserServer {
+			jid.Server = types.DefaultUserServer
+		}
+		return jid
 	}
-
-	blacklist := make(map[types.JID]struct{})
-	if statusPrivacy.Type == types.StatusPrivacyTypeBlacklist {
-		for _, jid := range statusPrivacy.List {
-			blacklist[jid] = struct{}{}
+	ownPN, ownLID := cli.getOwnID().ToNonAD(), cli.getOwnLID().ToNonAD()
+	var pns []types.JID
+	seenPNs := make(map[types.JID]struct{})
+	for _, list := range [][]types.JID{candidates, exclusions} {
+		for _, jid := range list {
+			jid = baseJID(jid)
+			if jid.User == "" || (jid.Server != types.DefaultUserServer && jid.Server != types.HiddenUserServer) {
+				return nil, errors.New("invalid user identity in status audience")
+			}
+			if jid.Server == types.DefaultUserServer && !(jid == ownPN && ownLID.User != "" && ownLID.Server == types.HiddenUserServer) {
+				if _, seen := seenPNs[jid]; !seen {
+					seenPNs[jid] = struct{}{}
+					pns = append(pns, jid)
+				}
+			}
 		}
 	}
-
-	var contactsArray []types.JID
-	for jid, contact := range contacts {
-		_, isBlacklisted := blacklist[jid]
-		if isBlacklisted {
+	var lidMap map[types.JID]types.JID
+	if len(pns) > 0 {
+		if cli.Store.LIDs == nil {
+			return nil, errors.New("LID store is unavailable for status audience")
+		}
+		var err error
+		lidMap, err = cli.Store.LIDs.GetManyLIDsForPNs(ctx, pns)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve status audience LIDs: %w", err)
+		}
+	}
+	resolve := func(jid types.JID) (types.JID, error) {
+		jid = baseJID(jid)
+		if jid.Server == types.DefaultUserServer {
+			if jid == ownPN {
+				jid = ownLID
+			} else {
+				jid = lidMap[jid].ToNonAD()
+			}
+		}
+		if jid.User == "" || jid.Server != types.HiddenUserServer {
+			return types.EmptyJID, errors.New("missing or invalid LID mapping for status audience")
+		}
+		return jid, nil
+	}
+	blacklist := make(map[types.JID]struct{}, len(exclusions))
+	for _, jid := range exclusions {
+		lid, err := resolve(jid)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve status privacy exclusion: %w", err)
+		}
+		blacklist[lid] = struct{}{}
+	}
+	seen := make(map[types.JID]struct{}, len(candidates))
+	var recipients []types.JID
+	for _, jid := range candidates {
+		lid, err := resolve(jid)
+		if err != nil {
+			return nil, fmt.Errorf("cannot resolve status recipient: %w", err)
+		}
+		if _, excluded := blacklist[lid]; excluded {
 			continue
 		}
-		// TODO should there be a better way to separate contacts and found push names in the db?
-		if len(contact.FullName) > 0 {
-			contactsArray = append(contactsArray, jid)
+		if _, duplicate := seen[lid]; !duplicate {
+			seen[lid] = struct{}{}
+			recipients = append(recipients, lid)
 		}
 	}
-	return contactsArray, nil
+	cli.Log.Debugf("Status broadcast audience: privacy=%s candidates=%d recipients=%d exclusions=%d", statusPrivacy.Type, len(candidates), len(recipients), len(exclusions))
+	return recipients, nil
 }
 
 var DefaultStatusPrivacy = []types.StatusPrivacy{{
