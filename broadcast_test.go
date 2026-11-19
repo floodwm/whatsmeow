@@ -133,7 +133,9 @@ func TestStatusBroadcastRecipientsFailClosed(t *testing.T) {
 			client := newStatusTestClient(map[types.JID]types.ContactInfo{lid: {FullName: "Saved"}}, tc.mappings)
 			client.Store.LIDs = statusLIDStore{mappings: tc.mappings, err: tc.mappingErr}
 			client.Store.Contacts = statusContactsStore{contacts: map[types.JID]types.ContactInfo{lid: {FullName: "Saved"}}, err: tc.contactsErr}
-			got, err := client.resolveStatusBroadcastRecipients(context.Background(), tc.privacy)
+			got, err := client.resolveStatusBroadcastRecipientsWithLookup(context.Background(), tc.privacy, func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
+				return nil, nil // WhatsApp could not recover any missing mapping.
+			})
 			if err == nil || len(got) != 0 || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("unsafe or misclassified result: audience=%v error=%v", got, err)
 			}

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"
@@ -53,6 +54,10 @@ func (cli *Client) getStatusBroadcastRecipients(ctx context.Context) ([]types.JI
 }
 
 func (cli *Client) resolveStatusBroadcastRecipients(ctx context.Context, statusPrivacy types.StatusPrivacy) ([]types.JID, error) {
+	return cli.resolveStatusBroadcastRecipientsWithLookup(ctx, statusPrivacy, cli.GetUserInfo)
+}
+
+func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Context, statusPrivacy types.StatusPrivacy, lookup func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error)) ([]types.JID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -111,6 +116,45 @@ func (cli *Client) resolveStatusBroadcastRecipients(ctx context.Context, statusP
 		lidMap, err = cli.Store.LIDs.GetManyLIDsForPNs(ctx, pns)
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve status audience LIDs: %w", err)
+		}
+		var missing []types.JID
+		for _, pn := range pns {
+			lid := lidMap[pn].ToNonAD()
+			if lid.User == "" || lid.Server != types.HiddenUserServer {
+				missing = append(missing, pn)
+			}
+		}
+		if len(missing) > 0 {
+			// One budget for all batches, never extending the caller's deadline.
+			lookupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if lidMap == nil {
+				lidMap = make(map[types.JID]types.JID, len(missing))
+			}
+			cli.Log.Debugf("Recovering status audience LIDs: missing=%d", len(missing))
+			for start := 0; start < len(missing); start += 50 {
+				if err = lookupCtx.Err(); err != nil {
+					return nil, fmt.Errorf("status audience LID recovery canceled: %w", err)
+				}
+				batch := missing[start:min(start+50, len(missing))]
+				var info map[types.JID]types.UserInfo
+				info, err = lookup(lookupCtx, batch)
+				if err != nil {
+					return nil, fmt.Errorf("failed to fetch missing status audience LIDs: %w", err)
+				}
+				if err = lookupCtx.Err(); err != nil {
+					return nil, fmt.Errorf("status audience LID recovery canceled: %w", err)
+				}
+				for _, pn := range batch {
+					lid := info[pn].LID.ToNonAD()
+					if lid.User == "" || lid.Server != types.HiddenUserServer {
+						return nil, errors.New("WhatsApp returned a missing or invalid LID for status audience")
+					}
+					// GetUserInfo may succeed even if persisting its cache failed.
+					// Use the validated response for this send, not another cache read.
+					lidMap[pn] = lid
+				}
+			}
 		}
 	}
 	resolve := func(jid types.JID) (types.JID, error) {
