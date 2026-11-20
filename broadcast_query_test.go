@@ -191,10 +191,8 @@ func TestStatusBroadcastLIDResponseValidation(t *testing.T) {
 		{"duplicate identical mapping", []waBinary.Node{user(pns[0], lid), user(pns[0], lid), user(pns[1], lid2)}, false},
 		{"unsolicited users are ignored", []waBinary.Node{user(pns[0], lid), user(pns[1], lid2), user(types.NewJID("79999999999", types.DefaultUserServer), types.EmptyJID)}, false},
 		{"incomplete list", []waBinary.Node{user(pns[0], lid)}, true},
-		{"empty LID", []waBinary.Node{user(pns[0], types.EmptyJID), user(pns[1], lid2)}, true},
-		{"PN is not LID", []waBinary.Node{user(pns[0], pns[0]), user(pns[1], lid2)}, true},
-		{"malformed attribute", []waBinary.Node{user(pns[0], "not a JID"), user(pns[1], lid2)}, true},
 		{"conflicting mapping", []waBinary.Node{user(pns[0], lid), user(pns[0], lid2), user(pns[1], lid2)}, true},
+		{"valid and unavailable duplicate conflict", []waBinary.Node{user(pns[0], lid), user(pns[0], types.EmptyJID), user(pns[1], lid2)}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newStatusTestClient(nil, nil)

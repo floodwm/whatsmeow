@@ -103,15 +103,28 @@ func (cli *Client) parseStatusBroadcastLIDs(ctx context.Context, pns []types.JID
 		if _, wanted := requested[pn]; !wanted {
 			continue
 		}
-		lidNode := user.GetChildByTag("lid")
-		ag := lidNode.AttrGetter()
-		lid := ag.OptionalJIDOrEmpty("val").ToNonAD()
-		if len(ag.Errors) > 0 || lid.User == "" || lid.Server != types.HiddenUserServer {
-			return nil, errors.New("WhatsApp returned a missing or invalid LID for status audience")
+		var lid types.JID
+		if _, hasError := user.GetOptionalChildByTag("error"); hasError {
+			userErr := parseIQError(&user)
+			var iqErr *IQError
+			if !errors.As(userErr, &iqErr) || (iqErr.Code != 400 && iqErr.Code != 404) {
+				return nil, userErr
+			}
+			cli.Log.Warnf("Status audience identity unavailable: recipient=%s code=%d", pn, iqErr.Code)
+		} else {
+			lidNode := user.GetChildByTag("lid")
+			ag := lidNode.AttrGetter()
+			lid = ag.OptionalJIDOrEmpty("val").ToNonAD()
+			if len(ag.Errors) > 0 || lid.User == "" || lid.Server != types.HiddenUserServer {
+				lid = types.EmptyJID
+			}
 		}
 		if previous, exists := info[pn]; exists && previous.LID != lid {
 			return nil, errors.New("WhatsApp returned conflicting LIDs for status audience")
 		}
+		// Presence with an empty LID is an individual failure; absence remains
+		// an incomplete batch. Only the resolver knows whether this is a viewer
+		// that can be skipped or a privacy exclusion that must stop the send.
 		info[pn] = types.UserInfo{LID: lid}
 	}
 	mappings := make([]store.LIDMapping, 0, len(info))
@@ -119,14 +132,18 @@ func (cli *Client) parseStatusBroadcastLIDs(ctx context.Context, pns []types.JID
 		if _, exists := info[pn]; !exists {
 			return nil, errors.New("WhatsApp returned an incomplete status audience LID list")
 		}
-		mappings = append(mappings, store.LIDMapping{PN: pn, LID: info[pn].LID})
+		if !info[pn].LID.IsEmpty() {
+			mappings = append(mappings, store.LIDMapping{PN: pn, LID: info[pn].LID})
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := cli.Store.LIDs.PutManyLIDMappings(ctx, mappings); err != nil {
-		// The validated response remains usable for this send, even if caching fails.
-		cli.Log.Warnf("Failed to cache status audience LIDs: count=%d error=%v", len(mappings), err)
+	if len(mappings) > 0 {
+		if err := cli.Store.LIDs.PutManyLIDMappings(ctx, mappings); err != nil {
+			// The validated response remains usable for this send, even if caching fails.
+			cli.Log.Warnf("Failed to cache status audience LIDs: count=%d error=%v", len(mappings), err)
+		}
 	}
 	return info, nil
 }

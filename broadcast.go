@@ -107,6 +107,7 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 		}
 	}
 	var lidMap map[types.JID]types.JID
+	var unavailable map[types.JID]struct{}
 	if len(pns) > 0 {
 		if cli.Store.LIDs == nil {
 			return nil, errors.New("LID store is unavailable for status audience")
@@ -150,9 +151,17 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 					return nil, fmt.Errorf("status audience LID recovery canceled: %w", err)
 				}
 				for _, pn := range batch {
-					lid := info[pn].LID.ToNonAD()
+					user, returned := info[pn]
+					if !returned {
+						return nil, errors.New("WhatsApp returned an incomplete status audience LID list")
+					}
+					lid := user.LID.ToNonAD()
 					if lid.User == "" || lid.Server != types.HiddenUserServer {
-						return nil, errors.New("WhatsApp returned a missing or invalid LID for status audience")
+						if unavailable == nil {
+							unavailable = make(map[types.JID]struct{})
+						}
+						unavailable[pn] = struct{}{}
+						continue
 					}
 					// The query may succeed even if persisting its cache failed.
 					// Use the validated response for this send, not another cache read.
@@ -184,11 +193,24 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 		blacklist[lid] = struct{}{}
 	}
 	seen := make(map[types.JID]struct{}, len(candidates))
+	var skipped map[types.JID]struct{}
+	hasOtherRecipient := false
 	var recipients []types.JID
 	for _, jid := range candidates {
 		lid, err := resolve(jid)
 		if err != nil {
-			return nil, fmt.Errorf("cannot resolve status recipient: %w", err)
+			pn := baseJID(jid)
+			if _, individuallyUnavailable := unavailable[pn]; !individuallyUnavailable {
+				return nil, fmt.Errorf("cannot resolve status recipient: %w", err)
+			}
+			if skipped == nil {
+				skipped = make(map[types.JID]struct{})
+			}
+			if _, logged := skipped[pn]; !logged {
+				cli.Log.Warnf("Skipping unresolved status recipient: recipient=%s reason=missing_or_invalid_lid", pn)
+				skipped[pn] = struct{}{}
+			}
+			continue
 		}
 		if _, excluded := blacklist[lid]; excluded {
 			continue
@@ -196,9 +218,18 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 		if _, duplicate := seen[lid]; !duplicate {
 			seen[lid] = struct{}{}
 			recipients = append(recipients, lid)
+			if lid != ownLID {
+				hasOtherRecipient = true
+			}
 		}
 	}
-	cli.Log.Debugf("Status broadcast audience: privacy=%s candidates=%d recipients=%d exclusions=%d", statusPrivacy.Type, len(candidates), len(recipients), len(exclusions))
+	if len(skipped) > 0 {
+		cli.Log.Warnf("Status audience has skipped recipients: skipped=%d recipients=%d", len(skipped), len(recipients))
+		if !hasOtherRecipient {
+			return nil, errors.New("no resolvable external status recipients remain after skipping unavailable viewers")
+		}
+	}
+	cli.Log.Debugf("Status broadcast audience: privacy=%s candidates=%d recipients=%d exclusions=%d skipped=%d", statusPrivacy.Type, len(candidates), len(recipients), len(exclusions), len(skipped))
 	return recipients, nil
 }
 

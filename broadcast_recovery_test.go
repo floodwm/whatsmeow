@@ -57,7 +57,7 @@ func TestStatusBroadcastRecoversLIDsBeforeApplyingPrivacy(t *testing.T) {
 	}
 }
 
-func TestStatusBroadcastRecoveryFailsClosed(t *testing.T) {
+func TestStatusBroadcastRecoveryPreservesQueryAndPrivacyErrors(t *testing.T) {
 	pn := types.NewJID("70000000001", types.DefaultUserServer)
 	lid := types.NewJID("90000000001", types.HiddenUserServer)
 	lookupErr := errors.New("USync failed")
@@ -76,6 +76,12 @@ func TestStatusBroadcastRecoveryFailsClosed(t *testing.T) {
 			t.Run(tc.name+string(mode), func(t *testing.T) {
 				client := newStatusTestClient(map[types.JID]types.ContactInfo{lid: {FullName: "Saved"}}, nil)
 				got, err := client.resolveStatusBroadcastRecipientsWithLookup(context.Background(), types.StatusPrivacy{Type: mode, List: []types.JID{pn, lid}}, func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) { return tc.result, tc.err })
+				if _, individuallyReturned := tc.result[pn]; individuallyReturned && tc.err == nil && mode == types.StatusPrivacyTypeWhitelist {
+					if err != nil || !slices.Equal(got, []types.JID{lid}) {
+						t.Fatalf("individual viewer failure blocked the valid peer: %v %v", got, err)
+					}
+					return
+				}
 				if err == nil || len(got) != 0 || tc.err != nil && !errors.Is(err, tc.err) {
 					t.Fatalf("unsafe result: %v, %v", got, err)
 				}
