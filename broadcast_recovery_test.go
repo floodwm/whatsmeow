@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
@@ -84,41 +85,43 @@ func TestStatusBroadcastRecoveryFailsClosed(t *testing.T) {
 }
 
 func TestStatusBroadcastRecoveryBatchesAndDeadline(t *testing.T) {
-	var pns []types.JID
-	want := make([]types.JID, 0, 121)
-	for i := range 121 {
-		pns = append(pns, types.NewJID(fmt.Sprintf("7%010d", i+1), types.DefaultUserServer))
-		want = append(want, types.NewJID(fmt.Sprintf("9%010d", i+1), types.HiddenUserServer))
-	}
-	client := newStatusTestClient(nil, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	parentDeadline, _ := ctx.Deadline()
-	var deadlines []time.Time
-	var batches []int
-	got, err := client.resolveStatusBroadcastRecipientsWithLookup(ctx, types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: pns}, func(ctx context.Context, batch []types.JID) (map[types.JID]types.UserInfo, error) {
-		deadline, _ := ctx.Deadline()
-		deadlines = append(deadlines, deadline)
-		batches = append(batches, len(batch))
-		result := make(map[types.JID]types.UserInfo)
-		for _, pn := range batch {
-			result[pn] = types.UserInfo{LID: types.NewJID("9"+pn.User[1:], types.HiddenUserServer)}
+	synctest.Test(t, func(t *testing.T) {
+		var pns []types.JID
+		want := make([]types.JID, 0, 121)
+		for i := range 121 {
+			pns = append(pns, types.NewJID(fmt.Sprintf("7%010d", i+1), types.DefaultUserServer))
+			want = append(want, types.NewJID(fmt.Sprintf("9%010d", i+1), types.HiddenUserServer))
 		}
-		return result, nil
+		client := newStatusTestClient(nil, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		parentDeadline, _ := ctx.Deadline()
+		var deadlines []time.Time
+		var batches []int
+		got, err := client.resolveStatusBroadcastRecipientsWithLookup(ctx, types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: pns}, func(ctx context.Context, batch []types.JID) (map[types.JID]types.UserInfo, error) {
+			deadline, _ := ctx.Deadline()
+			deadlines = append(deadlines, deadline)
+			batches = append(batches, len(batch))
+			result := make(map[types.JID]types.UserInfo)
+			for _, pn := range batch {
+				result[pn] = types.UserInfo{LID: types.NewJID("9"+pn.User[1:], types.HiddenUserServer)}
+			}
+			return result, nil
+		})
+		if err != nil || !slices.Equal(got, want) || !slices.Equal(batches, []int{100, 21}) {
+			t.Fatalf("got %d recipients, batches=%v err=%v", len(got), batches, err)
+		}
+		for _, deadline := range deadlines {
+			if !deadline.Equal(parentDeadline) {
+				t.Fatal("batch reset/extended the caller deadline")
+			}
+		}
 	})
-	if err != nil || !slices.Equal(got, want) || !slices.Equal(batches, []int{50, 50, 21}) {
-		t.Fatalf("got %d recipients, batches=%v err=%v", len(got), batches, err)
-	}
-	for _, deadline := range deadlines {
-		if !deadline.Equal(parentDeadline) {
-			t.Fatal("batch reset/extended the caller deadline")
-		}
-	}
 }
 
 func TestStatusBroadcastRecoveryCancellationStopsFurtherBatches(t *testing.T) {
 	var pns []types.JID
-	for i := range 51 {
+	for i := range 101 {
 		pns = append(pns, types.NewJID(fmt.Sprintf("7%010d", i+1), types.DefaultUserServer))
 	}
 	client := newStatusTestClient(nil, nil)
@@ -150,43 +153,45 @@ func TestStatusBroadcastCachedAudienceSkipsNetwork(t *testing.T) {
 
 func TestStatusBroadcastRecoveryNeverReturnsPartialAudience(t *testing.T) {
 	var pns []types.JID
-	for i := range 51 {
+	for i := range 101 {
 		pns = append(pns, types.NewJID(fmt.Sprintf("7%010d", i+1), types.DefaultUserServer))
 	}
 	for _, failure := range []string{"partial batch", "later batch error", "deadline expires after response"} {
 		t.Run(failure, func(t *testing.T) {
-			client := newStatusTestClient(nil, nil)
-			ctx := context.Background()
-			if failure == "deadline expires after response" {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 10*time.Millisecond)
-				defer cancel()
-			}
-			calls := 0
-			got, err := client.resolveStatusBroadcastRecipientsWithLookup(ctx, types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: pns}, func(ctx context.Context, batch []types.JID) (map[types.JID]types.UserInfo, error) {
-				calls++
-				result := make(map[types.JID]types.UserInfo)
-				for _, pn := range batch {
-					result[pn] = types.UserInfo{LID: types.NewJID("9"+pn.User[1:], types.HiddenUserServer)}
+			synctest.Test(t, func(t *testing.T) {
+				client := newStatusTestClient(nil, nil)
+				ctx := context.Background()
+				if failure == "deadline expires after response" {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 10*time.Millisecond)
+					defer cancel()
 				}
-				if failure == "partial batch" {
-					delete(result, batch[len(batch)-1])
-				} else if failure == "later batch error" && calls == 2 {
-					return nil, ErrNotConnected
-				} else if failure == "deadline expires after response" {
-					<-ctx.Done()
+				calls := 0
+				got, err := client.resolveStatusBroadcastRecipientsWithLookup(ctx, types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: pns}, func(ctx context.Context, batch []types.JID) (map[types.JID]types.UserInfo, error) {
+					calls++
+					result := make(map[types.JID]types.UserInfo)
+					for _, pn := range batch {
+						result[pn] = types.UserInfo{LID: types.NewJID("9"+pn.User[1:], types.HiddenUserServer)}
+					}
+					if failure == "partial batch" {
+						delete(result, batch[len(batch)-1])
+					} else if failure == "later batch error" && calls == 2 {
+						return nil, ErrNotConnected
+					} else if failure == "deadline expires after response" {
+						<-ctx.Done()
+					}
+					return result, nil
+				})
+				if err == nil || len(got) != 0 {
+					t.Fatalf("partial audience leaked: %v err=%v", got, err)
 				}
-				return result, nil
+				if failure == "later batch error" && (!errors.Is(err, ErrNotConnected) || calls != 2) {
+					t.Fatalf("late failure misclassified: calls=%d err=%v", calls, err)
+				}
+				if failure == "deadline expires after response" && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("expired result accepted/misclassified: %v", err)
+				}
 			})
-			if err == nil || len(got) != 0 {
-				t.Fatalf("partial audience leaked: %v err=%v", got, err)
-			}
-			if failure == "later batch error" && (!errors.Is(err, ErrNotConnected) || calls != 2) {
-				t.Fatalf("late failure misclassified: calls=%d err=%v", calls, err)
-			}
-			if failure == "deadline expires after response" && !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("expired result accepted/misclassified: %v", err)
-			}
 		})
 	}
 }
