@@ -81,11 +81,10 @@ func TestStatusBroadcastRecipientsRespectPrivacyAndUseUniqueLIDs(t *testing.T) {
 		{"mixed aliases and devices", types.StatusPrivacy{Type: types.StatusPrivacyTypeContacts}, map[types.JID]types.ContactInfo{pn: named, lid: named, pnDevice: named, lidDevice: named, legacyPN: named, otherPN: named}, []types.JID{lid, otherLID}},
 		{"push names not saved contacts", types.StatusPrivacy{Type: types.StatusPrivacyTypeContacts}, map[types.JID]types.ContactInfo{pn: named, otherPN: {PushName: "Not saved"}}, []types.JID{lid}},
 		{"whitelist ignores contact store", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{pn, lid, lidDevice, legacyPN}}, map[types.JID]types.ContactInfo{otherPN: named}, []types.JID{lid}},
-		{"empty whitelist stays empty", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist}, map[types.JID]types.ContactInfo{otherPN: named}, nil},
 		{"PN blacklist excludes LID and PN aliases", types.StatusPrivacy{Type: types.StatusPrivacyTypeBlacklist, List: []types.JID{pnDevice}}, map[types.JID]types.ContactInfo{pn: named, lidDevice: named, otherLID: named}, []types.JID{otherLID}},
 		{"LID blacklist excludes PN alias", types.StatusPrivacy{Type: types.StatusPrivacyTypeBlacklist, List: []types.JID{lidDevice}}, map[types.JID]types.ContactInfo{pnDevice: named, lid: named, otherPN: named}, []types.JID{otherLID}},
 		{"legacy blacklist excludes LID alias", types.StatusPrivacy{Type: types.StatusPrivacyTypeBlacklist, List: []types.JID{legacyPN}}, map[types.JID]types.ContactInfo{lid: named, otherLID: named}, []types.JID{otherLID}},
-		{"own contact uses known device LID", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{types.NewJID("70000000000", types.DefaultUserServer)}}, nil, []types.JID{types.NewJID("90000000000", types.HiddenUserServer)}},
+		{"own contact uses known device LID", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{types.NewJID("70000000000", types.DefaultUserServer), otherLID}}, nil, []types.JID{types.NewJID("90000000000", types.HiddenUserServer), otherLID}},
 		{"non-user contact entries are not recipients", types.StatusPrivacy{Type: types.StatusPrivacyTypeContacts}, map[types.JID]types.ContactInfo{pn: named, types.NewJID("123", types.GroupServer): named}, []types.JID{lid}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,6 +119,8 @@ func TestStatusBroadcastRecipientsFailClosed(t *testing.T) {
 		wantErr                 error
 	}{
 		{"missing selected mapping", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{pn, lid}}, nil, nil, nil, nil},
+		{"empty whitelist", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist}, nil, nil, nil, nil},
+		{"self only", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{types.NewJID("70000000000", types.DefaultUserServer)}}, nil, nil, nil, nil},
 		{"missing excluded mapping", types.StatusPrivacy{Type: types.StatusPrivacyTypeBlacklist, List: []types.JID{pn}}, nil, nil, nil, nil},
 		{"invalid mapping domain", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{pn}}, map[types.JID]types.JID{pn: pn}, nil, nil, nil},
 		{"empty mapping user", types.StatusPrivacy{Type: types.StatusPrivacyTypeWhitelist, List: []types.JID{pn}}, map[types.JID]types.JID{pn: types.NewJID("", types.HiddenUserServer)}, nil, nil, nil},

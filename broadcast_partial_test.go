@@ -59,8 +59,23 @@ func TestStatusBroadcastUnavailableExclusionStillStopsSend(t *testing.T) {
 	got, err := client.resolveStatusBroadcastRecipientsWithLookup(context.Background(), types.StatusPrivacy{Type: types.StatusPrivacyTypeBlacklist, List: []types.JID{pn}}, func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
 		return map[types.JID]types.UserInfo{pn: {}}, nil
 	})
-	if err == nil || len(got) != 0 || !strings.Contains(err.Error(), "exclusion") {
+	if err == nil || len(got) != 0 || !strings.Contains(err.Error(), "no resolvable external") {
 		t.Fatalf("privacy exclusion ignored: %v %v", got, err)
+	}
+}
+
+func TestStatusBroadcastMissingExclusionKeepsOnlyUnambiguousPeers(t *testing.T) {
+	pns := statusTestPNs(4)
+	allowed, ambiguous, denied := types.NewJID("901", types.HiddenUserServer), types.NewJID("902", types.HiddenUserServer), types.NewJID("903", types.HiddenUserServer)
+	named := types.ContactInfo{FullName: "Saved"}
+	client := newStatusTestClient(map[types.JID]types.ContactInfo{
+		pns[0]: named, pns[1]: named, pns[2]: named, pns[3]: named, allowed: named, ambiguous: named, denied: named,
+	}, map[types.JID]types.JID{pns[3]: denied})
+	got, err := client.resolveStatusBroadcastRecipientsWithLookup(context.Background(), types.StatusPrivacy{Type: types.StatusPrivacyTypeBlacklist, List: []types.JID{pns[1], pns[3]}}, func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
+		return map[types.JID]types.UserInfo{pns[0]: {LID: allowed}}, nil
+	})
+	if err != nil || !slices.Equal(got, []types.JID{allowed}) {
+		t.Fatalf("audience=%v err=%v", got, err)
 	}
 }
 

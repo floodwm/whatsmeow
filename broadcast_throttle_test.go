@@ -56,6 +56,42 @@ func TestStatusBroadcastBulkQueryPacing(t *testing.T) {
 	})
 }
 
+func TestStatusBroadcastConcurrentLookupRespectsPeerRateLimit(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cli := newStatusTestClient(nil, nil)
+		start := time.Now()
+		entered, release := make(chan struct{}), make(chan struct{})
+		first, second := make(chan error, 1), make(chan error, 1)
+		short, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		go func() {
+			_, err := cli.lookupStatusBroadcastLIDBatch(short, statusTestPNs(1), func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
+				close(entered)
+				<-release
+				return nil, ErrIQRateOverLimit
+			})
+			first <- err
+		}()
+		<-entered
+		var at time.Duration
+		go func() {
+			_, err := cli.lookupStatusBroadcastLIDBatch(context.Background(), statusTestPNs(2), func(_ context.Context, batch []types.JID) (map[types.JID]types.UserInfo, error) {
+				at = time.Since(start)
+				return statusTestLIDResponse(batch)
+			})
+			second <- err
+		}()
+		synctest.Wait()
+		close(release)
+		if err := <-first; !errors.Is(err, ErrIQRateOverLimit) {
+			t.Fatal(err)
+		}
+		if err := <-second; err != nil || at != 10*time.Second {
+			t.Fatalf("second lookup after %v err=%v", at, err)
+		}
+	})
+}
+
 func TestStatusBroadcastRateLimitRetriesOnlyCurrentBatchOnce(t *testing.T) {
 	for _, secondFails := range []bool{false, true} {
 		t.Run(fmt.Sprint(secondFails), func(t *testing.T) {

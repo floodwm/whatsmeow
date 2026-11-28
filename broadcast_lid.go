@@ -41,7 +41,18 @@ func waitStatusLIDQuery(ctx context.Context, delay time.Duration) error {
 }
 
 func (cli *Client) lookupStatusBroadcastLIDBatch(ctx context.Context, pns []types.JID, lookup func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error)) (map[types.JID]types.UserInfo, error) {
+	select {
+	case cli.statusLIDGate <- struct{}{}:
+		defer func() { <-cli.statusLIDGate }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	for attempt := 0; ; attempt++ {
+		if delay := time.Until(cli.statusLIDNext); delay > 0 {
+			if err := waitStatusLIDQuery(ctx, delay); err != nil {
+				return nil, err
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -55,6 +66,11 @@ func (cli *Client) lookupStatusBroadcastLIDBatch(ctx context.Context, pns []type
 			return nil, err
 		}
 		info, err := lookup(attemptCtx, pns)
+		delay := statusLIDBatchDelay
+		if errors.Is(err, ErrIQRateOverLimit) {
+			delay = statusLIDRateLimitDelay
+		}
+		cli.statusLIDNext = time.Now().Add(delay)
 		if ctxErr := attemptCtx.Err(); ctxErr != nil {
 			err = ctxErr
 		}
@@ -69,9 +85,6 @@ func (cli *Client) lookupStatusBroadcastLIDBatch(ctx context.Context, pns []type
 			return nil, err // No time for the cooldown and any useful retry.
 		}
 		cli.Log.Warnf("Status audience LID query rate-limited: count=%d retry_delay=%s", len(pns), statusLIDRateLimitDelay)
-		if err = waitStatusLIDQuery(ctx, statusLIDRateLimitDelay); err != nil {
-			return nil, err
-		}
 	}
 }
 
@@ -86,6 +99,12 @@ func (cli *Client) getStatusBroadcastLIDs(ctx context.Context, pns []types.JID) 
 }
 
 func (cli *Client) parseStatusBroadcastLIDs(ctx context.Context, pns []types.JID, list *waBinary.Node) (map[types.JID]types.UserInfo, error) {
+	if list == nil || list.Tag != "list" {
+		return nil, errors.New("invalid status audience response: missing list")
+	}
+	if _, ok := list.Content.([]waBinary.Node); !ok && list.Content != nil {
+		return nil, errors.New("invalid status audience list content")
+	}
 	requested := make(map[types.JID]struct{}, len(pns))
 	for _, pn := range pns {
 		requested[pn] = struct{}{}
@@ -93,8 +112,8 @@ func (cli *Client) parseStatusBroadcastLIDs(ctx context.Context, pns []types.JID
 	info := make(map[types.JID]types.UserInfo, len(pns))
 	for _, user := range list.GetChildren() {
 		pn, ok := user.Attrs["jid"].(types.JID)
-		if user.Tag != "user" || !ok {
-			continue
+		if user.Tag != "user" || !ok || pn.User == "" {
+			return nil, errors.New("invalid user entry in status audience response")
 		}
 		pn = pn.ToNonAD()
 		if pn.Server == types.LegacyUserServer {
@@ -122,16 +141,11 @@ func (cli *Client) parseStatusBroadcastLIDs(ctx context.Context, pns []types.JID
 		if previous, exists := info[pn]; exists && previous.LID != lid {
 			return nil, errors.New("WhatsApp returned conflicting LIDs for status audience")
 		}
-		// Presence with an empty LID is an individual failure; absence remains
-		// an incomplete batch. Only the resolver knows whether this is a viewer
-		// that can be skipped or a privacy exclusion that must stop the send.
+		// Keep only returned users. The resolver applies privacy for missing peers.
 		info[pn] = types.UserInfo{LID: lid}
 	}
 	mappings := make([]store.LIDMapping, 0, len(info))
 	for _, pn := range pns {
-		if _, exists := info[pn]; !exists {
-			return nil, errors.New("WhatsApp returned an incomplete status audience LID list")
-		}
 		if !info[pn].LID.IsEmpty() {
 			mappings = append(mappings, store.LIDMapping{PN: pn, LID: info[pn].LID})
 		}

@@ -133,11 +133,6 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 			}
 			cli.Log.Debugf("Recovering status audience LIDs: missing=%d", len(missing))
 			for start := 0; start < len(missing); start += statusLIDBatchSize {
-				if start > 0 {
-					if err = waitStatusLIDQuery(lookupCtx, statusLIDBatchDelay); err != nil {
-						return nil, fmt.Errorf("status audience LID recovery canceled: %w", err)
-					}
-				}
 				if err = lookupCtx.Err(); err != nil {
 					return nil, fmt.Errorf("status audience LID recovery canceled: %w", err)
 				}
@@ -150,12 +145,11 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 				if err = lookupCtx.Err(); err != nil {
 					return nil, fmt.Errorf("status audience LID recovery canceled: %w", err)
 				}
+				if info == nil {
+					return nil, errors.New("missing status audience LID response")
+				}
 				for _, pn := range batch {
-					user, returned := info[pn]
-					if !returned {
-						return nil, errors.New("WhatsApp returned an incomplete status audience LID list")
-					}
-					lid := user.LID.ToNonAD()
+					lid := info[pn].LID.ToNonAD()
 					if lid.User == "" || lid.Server != types.HiddenUserServer {
 						if unavailable == nil {
 							unavailable = make(map[types.JID]struct{})
@@ -185,12 +179,26 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 		return jid, nil
 	}
 	blacklist := make(map[types.JID]struct{}, len(exclusions))
+	unresolvedExclusions := 0
 	for _, jid := range exclusions {
 		lid, err := resolve(jid)
 		if err != nil {
+			if _, missing := unavailable[baseJID(jid)]; missing {
+				unresolvedExclusions++
+				continue
+			}
 			return nil, fmt.Errorf("cannot resolve status privacy exclusion: %w", err)
 		}
 		blacklist[lid] = struct{}{}
+	}
+	// If an excluded number is unknown, a direct LID might be its alias.
+	// Only keep LIDs with a verified number; known exclusions are filtered below.
+	var verifiedLIDs map[types.JID]struct{}
+	if unresolvedExclusions > 0 {
+		verifiedLIDs = make(map[types.JID]struct{}, len(lidMap))
+		for _, lid := range lidMap {
+			verifiedLIDs[lid.ToNonAD()] = struct{}{}
+		}
 	}
 	seen := make(map[types.JID]struct{}, len(candidates))
 	var skipped map[types.JID]struct{}
@@ -215,6 +223,15 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 		if _, excluded := blacklist[lid]; excluded {
 			continue
 		}
+		if verifiedLIDs != nil && baseJID(jid).Server == types.HiddenUserServer {
+			if _, known := verifiedLIDs[lid]; !known {
+				if skipped == nil {
+					skipped = make(map[types.JID]struct{})
+				}
+				skipped[lid] = struct{}{}
+				continue
+			}
+		}
 		if _, duplicate := seen[lid]; !duplicate {
 			seen[lid] = struct{}{}
 			recipients = append(recipients, lid)
@@ -223,11 +240,11 @@ func (cli *Client) resolveStatusBroadcastRecipientsWithLookup(ctx context.Contex
 			}
 		}
 	}
-	if len(skipped) > 0 {
-		cli.Log.Warnf("Status audience has skipped recipients: skipped=%d recipients=%d", len(skipped), len(recipients))
-		if !hasOtherRecipient {
-			return nil, errors.New("no resolvable external status recipients remain after skipping unavailable viewers")
-		}
+	if len(skipped) > 0 || unresolvedExclusions > 0 {
+		cli.Log.Warnf("Status audience has skipped recipients: skipped=%d unresolved_exclusions=%d recipients=%d", len(skipped), unresolvedExclusions, len(recipients))
+	}
+	if !hasOtherRecipient {
+		return nil, errors.New("no resolvable external status recipients remain")
 	}
 	cli.Log.Debugf("Status broadcast audience: privacy=%s candidates=%d recipients=%d exclusions=%d skipped=%d", statusPrivacy.Type, len(candidates), len(recipients), len(exclusions), len(skipped))
 	return recipients, nil

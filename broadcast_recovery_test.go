@@ -76,7 +76,7 @@ func TestStatusBroadcastRecoveryPreservesQueryAndPrivacyErrors(t *testing.T) {
 			t.Run(tc.name+string(mode), func(t *testing.T) {
 				client := newStatusTestClient(map[types.JID]types.ContactInfo{lid: {FullName: "Saved"}}, nil)
 				got, err := client.resolveStatusBroadcastRecipientsWithLookup(context.Background(), types.StatusPrivacy{Type: mode, List: []types.JID{pn, lid}}, func(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) { return tc.result, tc.err })
-				if _, individuallyReturned := tc.result[pn]; individuallyReturned && tc.err == nil && mode == types.StatusPrivacyTypeWhitelist {
+				if tc.result != nil && tc.err == nil && mode == types.StatusPrivacyTypeWhitelist {
 					if err != nil || !slices.Equal(got, []types.JID{lid}) {
 						t.Fatalf("individual viewer failure blocked the valid peer: %v %v", got, err)
 					}
@@ -157,7 +157,7 @@ func TestStatusBroadcastCachedAudienceSkipsNetwork(t *testing.T) {
 	}
 }
 
-func TestStatusBroadcastRecoveryNeverReturnsPartialAudience(t *testing.T) {
+func TestStatusBroadcastRecoveryDistinguishesOmittedUsersFromBatchFailure(t *testing.T) {
 	var pns []types.JID
 	for i := range 101 {
 		pns = append(pns, types.NewJID(fmt.Sprintf("7%010d", i+1), types.DefaultUserServer))
@@ -188,6 +188,12 @@ func TestStatusBroadcastRecoveryNeverReturnsPartialAudience(t *testing.T) {
 					}
 					return result, nil
 				})
+				if failure == "partial batch" {
+					if err != nil || calls != 2 || len(got) != 99 {
+						t.Fatalf("valid peers lost: recipients=%d calls=%d err=%v", len(got), calls, err)
+					}
+					return
+				}
 				if err == nil || len(got) != 0 {
 					t.Fatalf("partial audience leaked: %v err=%v", got, err)
 				}

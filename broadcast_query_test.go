@@ -190,7 +190,7 @@ func TestStatusBroadcastLIDResponseValidation(t *testing.T) {
 		{"canonical aliases and device suffixes", []waBinary.Node{user(legacy, lid), user(pns[1], lid2)}, false},
 		{"duplicate identical mapping", []waBinary.Node{user(pns[0], lid), user(pns[0], lid), user(pns[1], lid2)}, false},
 		{"unsolicited users are ignored", []waBinary.Node{user(pns[0], lid), user(pns[1], lid2), user(types.NewJID("79999999999", types.DefaultUserServer), types.EmptyJID)}, false},
-		{"incomplete list", []waBinary.Node{user(pns[0], lid)}, true},
+		{"invalid user entry", []waBinary.Node{user(pns[0], lid), {Tag: "user"}}, true},
 		{"conflicting mapping", []waBinary.Node{user(pns[0], lid), user(pns[0], lid2), user(pns[1], lid2)}, true},
 		{"valid and unavailable duplicate conflict", []waBinary.Node{user(pns[0], lid), user(pns[0], types.EmptyJID), user(pns[1], lid2)}, true},
 	} {
@@ -209,5 +209,19 @@ func TestStatusBroadcastLIDResponseValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStatusBroadcastPartialListCachesOnlyReturnedViewer(t *testing.T) {
+	pns := statusTestPNs(2)
+	lid := types.NewJID("90000000001", types.HiddenUserServer)
+	client := newStatusTestClient(nil, nil)
+	cache := &statusQueryStore{}
+	client.Store.LIDs = cache
+	got, err := client.parseStatusBroadcastLIDs(context.Background(), pns, &waBinary.Node{Tag: "list", Content: []waBinary.Node{
+		{Tag: "user", Attrs: waBinary.Attrs{"jid": pns[0]}, Content: []waBinary.Node{{Tag: "lid", Attrs: waBinary.Attrs{"val": lid}}}},
+	}})
+	if err != nil || len(got) != 1 || got[pns[0]].LID != lid || len(cache.saved) != 1 || cache.saved[0].LID != lid {
+		t.Fatalf("partial response: got %v saved %v err %v", got, cache.saved, err)
 	}
 }

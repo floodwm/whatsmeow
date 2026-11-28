@@ -138,6 +138,9 @@ type Client struct {
 	appStateKeyRequestsLock sync.RWMutex
 
 	messageSendLock sync.Mutex
+	// Protects the next allowed query time and serializes status LID lookups only.
+	statusLIDGate chan struct{}
+	statusLIDNext time.Time
 
 	tcTokenSenderTS            map[types.JID]time.Time
 	tcTokenSenderTSLock        sync.Mutex
@@ -277,6 +280,7 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
 		Transport: (http.DefaultTransport.(*http.Transport)).Clone(),
 	}
 	cli := &Client{
+		statusLIDGate:      make(chan struct{}, 1),
 		mediaHTTP:          ptr.Clone(baseHTTPClient),
 		websocketHTTP:      ptr.Clone(baseHTTPClient),
 		preLoginHTTP:       ptr.Clone(baseHTTPClient),
